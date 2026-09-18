@@ -222,12 +222,38 @@ else:
                 "try a stronger model via LLM_MODEL in .env (e.g. gemini-2.5-flash).",
             )
     except Exception as exc:
+        import re
+
         msg = str(exc)
+        lowered = msg.lower()
         fix = f"Check {key_name} is valid and LLM_PROVIDER={provider} matches the key you have."
-        if "not found" in msg.lower() or "404" in msg or "model" in msg.lower():
+
+        # Gateways (LiteLLM and friends) often restrict a team to a model
+        # pattern like ['gemini/*'] and report the allowed list in the error.
+        # If it's there, turn it into the exact model name to use.
+        allowed = re.search(r"can only access models=\[([^\]]+)\]", msg)
+        if allowed:
+            patterns = [pat.strip().strip("'\"") for pat in allowed.group(1).split(",")]
+            current = os.environ.get("LLM_MODEL", "").strip()
+            suggestion = patterns[0]
+            if suggestion.endswith("/*"):
+                prefix = suggestion[:-1]  # "gemini/*" -> "gemini/"
+                base = current.split("/")[-1] or "gemini-2.0-flash"
+                suggestion = f"{prefix}{base}"
             fix = (
-                "The model name may not be available on your key. Try setting "
-                "LLM_MODEL in .env to gemini-2.5-flash or gemini-1.5-flash."
+                f"Your key is valid, but this gateway only allows {patterns}. "
+                f"Set LLM_MODEL in .env to: {suggestion}"
+            )
+        elif "not found" in lowered or "404" in msg:
+            fix = (
+                "The model name may not be available on your key. Try another, "
+                "e.g. gemini/gemini-2.5-flash or gemini/gemini-1.5-flash."
+            )
+        elif "401" in msg or "unauthor" in lowered or "api key not valid" in lowered:
+            fix = (
+                f"The gateway rejected {key_name}. Check the key was pasted whole, "
+                f"with no quotes or trailing spaces, and that LLM_PROVIDER={provider} "
+                "and OPENAI_BASE_URL point at the right service."
             )
         report(FAIL, f"AI model call failed: {type(exc).__name__}: {msg[:200]}", fix)
 
