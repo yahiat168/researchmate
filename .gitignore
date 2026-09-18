@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+!.gitkeep
+.pytest_cache/
+.streamlit/
