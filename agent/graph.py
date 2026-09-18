@@ -43,11 +43,26 @@ MAX_TOOL_ROUNDS = 3
 def get_llm():
     """Build the chat model from environment configuration.
 
-    LLM_PROVIDER selects "openai" (default) or "anthropic" so the same
-    graph runs with whichever API key is available; LLM_MODEL overrides the
-    default model name for either provider.
+    LLM_PROVIDER selects the provider so the same graph runs with whichever
+    API key is available:
+
+      - "google" / "gemini" -> ChatGoogleGenerativeAI (reads GOOGLE_API_KEY)
+      - "anthropic"          -> ChatAnthropic (reads ANTHROPIC_API_KEY)
+      - "openai" (default)   -> ChatOpenAI (reads OPENAI_API_KEY). If
+        OPENAI_BASE_URL is set, it is used as the endpoint, which also
+        covers any OpenAI-compatible gateway (including Gemini's
+        OpenAI-compatible endpoint and course-provided proxies).
+
+    LLM_MODEL overrides the default model name for any provider.
     """
     provider = os.environ.get("LLM_PROVIDER", "openai").lower()
+
+    if provider in ("google", "gemini"):
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        model = os.environ.get("LLM_MODEL", "gemini-2.0-flash")
+        return ChatGoogleGenerativeAI(model=model, temperature=0)
+
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
@@ -57,7 +72,11 @@ def get_llm():
     from langchain_openai import ChatOpenAI
 
     model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
-    return ChatOpenAI(model=model, temperature=0)
+    kwargs = {"model": model, "temperature": 0}
+    base_url = os.environ.get("OPENAI_BASE_URL")
+    if base_url:
+        kwargs["base_url"] = base_url
+    return ChatOpenAI(**kwargs)
 
 
 # ---------------------------------------------------------------------------

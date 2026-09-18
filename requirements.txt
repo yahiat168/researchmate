@@ -4,6 +4,7 @@ langchain-core>=0.3.21
 langchain-tavily>=0.1.0
 langchain-openai>=0.2.10
 langchain-anthropic>=0.3.0
+langchain-google-genai>=2.0.0
 streamlit>=1.39.0
 python-dotenv>=1.0.1
 pytest>=8.3.3

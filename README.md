@@ -89,7 +89,7 @@ researchmate/
 
 ## 5. Setup
 
-**Requirements:** Python 3.11+, a [Tavily](https://tavily.com) API key, and an OpenAI or Anthropic API key.
+**Requirements:** Python 3.11+, a [Tavily](https://app.tavily.com) API key (free tier available), and an API key for one AI model provider — Google Gemini, OpenAI, or Anthropic.
 
 ```bash
 cd researchmate
@@ -98,8 +98,18 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# then edit .env and fill in TAVILY_API_KEY and OPENAI_API_KEY (or ANTHROPIC_API_KEY + LLM_PROVIDER=anthropic)
+# then edit .env: set TAVILY_API_KEY, and pick ONE model provider block
 ```
+
+`.env.example` has a ready-made block for each provider — uncomment the one you have a key for. The default is Gemini (`LLM_PROVIDER=google`, `GOOGLE_API_KEY=...`). If you were given a custom OpenAI-compatible endpoint, use `LLM_PROVIDER=openai` and set `OPENAI_BASE_URL` to it.
+
+**Before running the app, verify your setup:**
+
+```bash
+python check_setup.py
+```
+
+This checks your Python version, packages, and `.env`, then makes one real call to Tavily and one real tool-calling test against your model. Every failure it finds prints exactly what to do about it.
 
 ## 6. Running the app
 
