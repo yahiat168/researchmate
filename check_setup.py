@@ -110,6 +110,36 @@ else:
             "Check the key is correct and has credits left at https://app.tavily.com",
         )
 
+# --- 4b. Custom endpoint probe (LiteLLM / other OpenAI-compatible proxies)
+def probe_endpoint(base_url: str, api_key: str):
+    """Try GET {base}/models on the given URL and on its /v1 variant.
+
+    Returns (working_base_url, [model names]) or (None, []). Proxies such as
+    LiteLLM expose their own model aliases, and the right base URL may or
+    may not need a /v1 suffix -- so we find out rather than guessing.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    candidates = [base_url.rstrip("/")]
+    if not base_url.rstrip("/").endswith("/v1"):
+        candidates.append(base_url.rstrip("/") + "/v1")
+
+    for candidate in candidates:
+        try:
+            req = urllib.request.Request(
+                f"{candidate}/models", headers={"Authorization": f"Bearer {api_key}"}
+            )
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            models = [m.get("id") for m in payload.get("data", []) if m.get("id")]
+            return candidate, models
+        except Exception:
+            continue
+    return None, []
+
+
 # --- 5. The AI model -----------------------------------------------------
 provider = os.environ.get("LLM_PROVIDER", "openai").lower()
 key_names = {
@@ -130,6 +160,42 @@ if not model_key or model_key.startswith("your-"):
         f"Put your key in .env as {key_name}=...  and make sure LLM_PROVIDER={provider} is correct.",
     )
 else:
+    # If a custom endpoint is configured, confirm it's reachable and show
+    # which model names it actually offers before we try to use one.
+    base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+    if provider == "openai" and base_url:
+        working, models = probe_endpoint(base_url, model_key)
+        if working is None:
+            report(
+                FAIL,
+                f"Could not reach the endpoint at {base_url}",
+                "Check the URL is exactly right and your key is valid for it. "
+                "If it needs a /v1 on the end, add it to OPENAI_BASE_URL in .env.",
+            )
+        else:
+            if working != base_url.rstrip("/"):
+                report(
+                    WARN,
+                    f"Endpoint works, but at {working} (not the URL in your .env)",
+                    f"Change OPENAI_BASE_URL in .env to: {working}",
+                )
+            else:
+                report(OK, f"Endpoint reachable at {working}")
+            if models:
+                current = os.environ.get("LLM_MODEL", "").strip()
+                print(f"       Models this endpoint offers ({len(models)}):")
+                for m in models[:25]:
+                    marker = "  <-- your LLM_MODEL" if m == current else ""
+                    print(f"         - {m}{marker}")
+                if len(models) > 25:
+                    print(f"         ... and {len(models) - 25} more")
+                if current and current not in models:
+                    report(
+                        FAIL,
+                        f"LLM_MODEL is '{current}', which this endpoint does not offer",
+                        f"Set LLM_MODEL in .env to one of the names listed above (e.g. {models[0]}).",
+                    )
+
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from agent.graph import get_llm
