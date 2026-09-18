@@ -140,6 +140,77 @@ def probe_endpoint(base_url: str, api_key: str):
     return None, []
 
 
+# --- 4c. Pick a working chat model automatically --------------------------
+# Gateways list everything they host -- video, image, audio, embedding and
+# chat models together -- and many entries are retired upstream even though
+# they're still advertised. Rather than making the user guess one at a
+# time, filter to plausible chat models and actually try them.
+
+NON_CHAT_MARKERS = (
+    "veo", "imagen", "lyria", "embedding", "transcribe", "tts", "audio",
+    "robotics", "image-generation", "live", "vision",
+)
+
+
+def rank_chat_candidates(models: list[str], required_prefix: str | None) -> list[str]:
+    """Best-guess ordering of which listed models can actually chat."""
+    candidates = []
+    for name in models:
+        if name.endswith("/*") or "*" in name:
+            continue  # permission wildcard, not a real model
+        if required_prefix and not name.startswith(required_prefix):
+            continue
+        short = name.split("/")[-1].lower()
+        if any(marker in short for marker in NON_CHAT_MARKERS):
+            continue
+        # Prefer flash/pro chat models; prefer stable over preview; prefer
+        # higher version numbers (newer models are likelier to still exist).
+        score = 0
+        if "flash" in short or "pro" in short:
+            score -= 10
+        if "preview" in short or "exp" in short:
+            score += 5
+        if "lite" in short:
+            score += 2
+        version = re.search(r"(\d+)\.(\d+)", short)
+        if version:
+            score -= int(version.group(1)) * 2 + int(version.group(2)) * 0.1
+        candidates.append((score, name))
+    candidates.sort(key=lambda pair: pair[0])
+    return [name for _, name in candidates]
+
+
+def try_models(candidates: list[str], limit: int = 6):
+    """Call each candidate until one answers. Returns (name, supports_tools)."""
+    from agent.graph import get_llm
+    from agent.tools import ALL_TOOLS
+
+    original = os.environ.get("LLM_MODEL")
+    try:
+        for name in candidates[:limit]:
+            os.environ["LLM_MODEL"] = name
+            try:
+                llm = get_llm()
+                llm.invoke("Reply with exactly the word: ready")
+            except Exception as exc:
+                reason = "not allowed" if "403" in str(exc) else "unavailable"
+                print(f"         tried {name} -- {reason}")
+                continue
+            # It answers. Now check the thing the app actually needs.
+            try:
+                bound = llm.bind_tools(ALL_TOOLS)
+                reply = bound.invoke("Search the web for today's news. You must use a tool.")
+                return name, bool(getattr(reply, "tool_calls", None))
+            except Exception:
+                return name, False
+        return None, False
+    finally:
+        if original is not None:
+            os.environ["LLM_MODEL"] = original
+
+
+import re  # noqa: E402  (used by rank_chat_candidates)
+
 # --- 5. The AI model -----------------------------------------------------
 provider = os.environ.get("LLM_PROVIDER", "openai").lower()
 key_names = {
@@ -160,6 +231,9 @@ if not model_key or model_key.startswith("your-"):
         f"Put your key in .env as {key_name}=...  and make sure LLM_PROVIDER={provider} is correct.",
     )
 else:
+    discovered_models: list[str] = []
+    required_prefix: str | None = None
+
     # If a custom endpoint is configured, confirm it's reachable and show
     # which model names it actually offers before we try to use one.
     base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
@@ -182,18 +256,22 @@ else:
             else:
                 report(OK, f"Endpoint reachable at {working}")
             if models:
+                discovered_models = models
                 current = os.environ.get("LLM_MODEL", "").strip()
-                print(f"       Models this endpoint offers ({len(models)}):")
-                for m in models[:25]:
-                    marker = "  <-- your LLM_MODEL" if m == current else ""
-                    print(f"         - {m}{marker}")
-                if len(models) > 25:
-                    print(f"         ... and {len(models) - 25} more")
+                # A "family/*" entry is a permission wildcard: it tells us
+                # every usable model must carry that prefix.
+                for entry in models:
+                    if entry.endswith("/*"):
+                        required_prefix = entry[:-1]
+                        break
+                print(f"       Endpoint offers {len(models)} model name(s)"
+                      + (f"; your team is limited to {required_prefix}*" if required_prefix else ""))
                 if current and current not in models:
                     report(
-                        FAIL,
-                        f"LLM_MODEL is '{current}', which this endpoint does not offer",
-                        f"Set LLM_MODEL in .env to one of the names listed above (e.g. {models[0]}).",
+                        WARN,
+                        f"LLM_MODEL is '{current}', which is not in the endpoint's list",
+                        "Not always fatal (gateways list aliases inconsistently), "
+                        "but if the call below fails this is why.",
                     )
 
     try:
@@ -255,7 +333,41 @@ else:
                 f"with no quotes or trailing spaces, and that LLM_PROVIDER={provider} "
                 "and OPENAI_BASE_URL point at the right service."
             )
-        report(FAIL, f"AI model call failed: {type(exc).__name__}: {msg[:200]}", fix)
+
+        print(f"{FAIL} AI model call with '{os.environ.get('LLM_MODEL', '?')}' failed: "
+              f"{type(exc).__name__}: {msg[:160]}")
+
+        # The model name is the usual culprit, and we may already know every
+        # name this endpoint offers -- so try them instead of asking the user
+        # to guess again.
+        auto_fixed = False
+        if discovered_models and ("401" not in msg and "unauthor" not in lowered):
+            candidates = rank_chat_candidates(discovered_models, required_prefix)
+            if candidates:
+                print(f"       Auto-testing up to 6 of {len(candidates)} chat models...")
+                found, supports_tools = try_models(candidates)
+                if found:
+                    auto_fixed = True
+                    report(OK, f"Found a working model: {found}")
+                    report(
+                        OK if supports_tools else WARN,
+                        "Tool calling works with it" if supports_tools
+                        else "It answers, but did not request a tool on the test prompt",
+                    )
+                    print()
+                    print("       >>> Set this line in your .env file: <<<")
+                    print(f"       LLM_MODEL={found}")
+                    print()
+                    problems.append(f"Set LLM_MODEL={found} in .env, then run this again.")
+                else:
+                    report(
+                        FAIL,
+                        "None of the chat models tried would respond",
+                        "Ask the Sprints team which model name your key is meant to use.",
+                    )
+        if not auto_fixed and not discovered_models:
+            problems.append(fix)
+            print(f"       -> {fix}")
 
 # --- Summary -------------------------------------------------------------
 print("=" * 66)
